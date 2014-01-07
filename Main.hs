@@ -1,3 +1,4 @@
+import qualified Config
 import Control.Applicative
 import Control.Concurrent.Async
 import Control.Monad
@@ -16,9 +17,10 @@ import qualified Data.Attoparsec.Binary as A
 import qualified Pipes.Network.TCP.Safe as T
 import qualified Pipes.Network.TCP.TLS as S
 import Network.Socket
+import Network.Simple.TCP.TLS
 
-kProxyHost = "cyberproxy.pccw.com"
-kProxyPort = "8080"
+kProxyHost = Config.proxyHost
+kProxyPort = Config.proxyPort
 
 data ProxyRequest
   = ProxyRequest {

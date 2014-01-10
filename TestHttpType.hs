@@ -17,21 +17,22 @@ import HttpType hiding (Chunked)
 instance Arbitrary B.ByteString where
   arbitrary = B.pack <$> arbitrary
 
-instance Arbitrary Request where
+instance Arbitrary Message where
   arbitrary = do
-    meth <- elements [GET, POST, CONNECT]
-    let Just uri = parseURI "http://www.google.com/?q=foobar"
-    body <- case meth of
-      POST -> arbitrary
-      _ -> return B.empty
-    return $ mkRequestURI meth uri body
-
-instance Arbitrary Response where
-  arbitrary = do
-    (code, detail) <- elements $ zip
-      [200, 404, 500] ["OK", "Not Found", "Internal Server Error"]
-    body <- arbitrary
-    return $ mkResponse (ResponseStatus code detail) M.empty body
+    isReq <- arbitrary
+    if isReq
+      then do
+        meth <- elements [GET, POST, CONNECT]
+        let Just uri = parseURI "http://www.google.com/?q=foobar"
+        body <- case meth of
+          POST -> arbitrary
+          _ -> return B.empty
+        return $ mkRequestURI meth uri body
+      else do
+        (code, detail) <- elements $ zip
+          [200, 404, 500] ["OK", "Not Found", "Internal Server Error"]
+        body <- arbitrary
+        return $ mkResponse code detail M.empty body
 
 data Chunked a
   = Chunked {
@@ -52,29 +53,17 @@ checkRoundTrip parseA toBs a = if a' == a''
   A.Done rest  a'  = roundTrip a
   A.Done rest' a'' = roundTrip a'
   
-checkRequestCodec :: Request -> Bool
-checkRequestCodec = checkRoundTrip parseA toBs
+checkMessageCodec :: Message -> Bool
+checkMessageCodec = checkRoundTrip parseA toBs
  where
-  parseA = parseRequest undefined
-  toBs = runBSProducer . fromRequest
+  parseA = parseMessage undefined
+  toBs = runBSProducer . fromMessage
 
-checkRequestChunkedCodec :: Request -> Bool
-checkRequestChunkedCodec = checkRoundTrip parseA toBs
+checkMessageChunkedCodec :: Message -> Bool
+checkMessageChunkedCodec = checkRoundTrip parseA toBs
  where
-  parseA = parseRequest undefined
-  toBs = runBSProducer . fromRequestChunked 1
-
-checkResponseCodec :: Response -> Bool
-checkResponseCodec = checkRoundTrip parseA toBs
- where
-  parseA = parseResponse undefined
-  toBs = runBSProducer . fromResponse
-
-checkResponseChunkedCodec :: Response -> Bool
-checkResponseChunkedCodec = checkRoundTrip parseA toBs
- where
-  parseA = parseResponse undefined
-  toBs = runBSProducer . fromResponseChunked 1
+  parseA = parseMessage undefined
+  toBs = runBSProducer . fromMessageChunked 1
 
 runBSProducer :: Producer B.ByteString (Writer [B.ByteString]) () ->
                  B.ByteString

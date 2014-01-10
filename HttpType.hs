@@ -1,4 +1,4 @@
-{-# LANGUAGE OverloadedStrings, RecordWildCards #-}
+{-# LANGUAGE OverloadedStrings, RecordWildCards, NoMonomorphismRestriction #-}
 
 module HttpType where
 
@@ -18,12 +18,25 @@ import Numeric (showHex)
 
 type Headers = M.Map (CI.CI B.ByteString) B.ByteString
 
-data Request
-  = Request {
+data HttpVersion
+  = Http10
+  | Http11
+  deriving (Eq)
+
+instance Show HttpVersion where
+  show Http10 = "HTTP/1.0"
+  show Http11 = "HTTP/1.1"
+
+data StartLine
+  = ReqLine {
     rqMethod :: Method,
     rqPath :: B.ByteString,
-    rqHeaders :: Headers,
-    rqBody :: B.ByteString
+    slVer :: HttpVersion
+  }
+  | RespLine {
+    slVer :: HttpVersion,
+    rsStatCode :: Int,
+    rsReason :: B.ByteString
   }
   deriving (Show, Eq)
 
@@ -33,38 +46,31 @@ data Method
   | CONNECT
   deriving (Show, Eq, Ord)
 
-data Response
-  = Response {
-    rsStatus :: ResponseStatus,
-    rsHeaders :: Headers,
-    rsBody :: B.ByteString
+data Message
+  = Message {
+    msgStart :: StartLine,
+    msgHeaders :: Headers,
+    msgBody :: B.ByteString
   }
   deriving (Show, Eq)
 
-data ResponseStatus
-  = ResponseStatus {
-    statCode :: Int,
-    statDetail :: B.ByteString
-  }
-  deriving (Show, Eq)
-
+-- This is for easy parsing of body
 data TransferEncoding
   = ContentLength Int
   | Chunked
   | TillDisconn
   deriving (Show)
 
-mkRequest :: Method -> String -> B.ByteString -> Request
+mkRequest :: Method -> String -> B.ByteString -> Message
 mkRequest meth uriStr body = mkRequestURI meth uri body
  where
   Just uri = parseURI uriStr
 
-mkRequestURI :: Method -> URI -> B.ByteString -> Request
-mkRequestURI meth (URI {..}) body = Request {
-  rqMethod = meth,
-  rqPath = path,
-  rqHeaders = hostHeader,
-  rqBody = body
+mkRequestURI :: Method -> URI -> B.ByteString -> Message
+mkRequestURI meth (URI {..}) body = Message {
+  msgStart = ReqLine meth path Http11,
+  msgHeaders = hostHeader,
+  msgBody = body
 }
  where
   hostHeader = M.singleton "Host" (mkHost uriAuthority)
@@ -74,30 +80,49 @@ mkRequestURI meth (URI {..}) body = Request {
 mkLengthHeader body
   = M.singleton "Content-Length" (BC8.pack . show . B.length $ body)
 
-mkResponse :: ResponseStatus -> Headers -> B.ByteString -> Response
-mkResponse = Response
+mkResponse :: Int -> B.ByteString -> Headers -> B.ByteString -> Message
+mkResponse code reason headers body = Message {
+  msgStart = RespLine Http11 code reason,
+  msgHeaders = headers,
+  msgBody = body
+}
 
-fromRequest' :: Monad m => Request ->
+fromStartLine (ReqLine meth path ver) = do
+  yield . BC8.pack . show $ meth
+  yield " "
+  yield path
+  yield " "
+  yield . BC8.pack . show $ ver
+  yield "\r\n"
+
+fromStartLine (RespLine ver code reason) = do
+  yield . BC8.pack . show $ ver
+  yield " "
+  yield . BC8.pack . show $ code
+  yield " "
+  yield reason
+  yield "\r\n"
+
+fromMessage' :: Monad m => Message ->
                 (B.ByteString -> Producer B.ByteString m ()) ->
                 Producer B.ByteString m ()
-fromRequest' (Request {..}) bodyEncoder = do
-  yield (BC8.pack . show $ rqMethod) *> yield " " *> yield rqPath
-  yield " HTTP/1.1\r\n"
-  mapM_ fromHeader (M.toList rqHeaders)
+fromMessage' (Message {..}) bodyEncoder = do
+  fromStartLine msgStart
+  mapM_ fromHeader (M.toList msgHeaders)
   yield "\r\n"
-  bodyEncoder rqBody
+  bodyEncoder msgBody
 
-fromRequest req@(Request {..}) = fromRequest' req' yield
+fromMessage msg@(Message {..}) = fromMessage' msg' yield
  where
-  req' = req {
-    rqHeaders = mkLengthHeader rqBody `M.union` rqHeaders
+  msg' = msg {
+    msgHeaders = mkLengthHeader msgBody `M.union` msgHeaders
   }
 
-fromRequestChunked chunkSize req@(Request {..})
-  = fromRequest' req' (yieldChunked chunkSize)
+fromMessageChunked chunkSize msg@(Message {..})
+  = fromMessage' msg' (yieldChunked chunkSize)
  where
-  req' = req {
-    rqHeaders = M.insert "Transfer-Encoding" "chunked" rqHeaders
+  msg' = msg {
+    msgHeaders = M.insert "Transfer-Encoding" "chunked" msgHeaders
   }
 
 fromHeader :: Monad m => (CI.CI B.ByteString, B.ByteString) ->
@@ -105,96 +130,89 @@ fromHeader :: Monad m => (CI.CI B.ByteString, B.ByteString) ->
 fromHeader (name, val)
   = yield (CI.original name) *> yield ": " *> yield val *> yield "\r\n"
 
-parseRequest :: A.Parser B.ByteString -> A.Parser Request
+fromHeaders = mapM_ fromHeader . M.toList
+
+parseReqStart :: A.Parser StartLine
+parseReqStart
+  = ReqLine <$> pMethod <* AC8.space
+            <*> pPath <* AC8.space
+            <*> pVer <* AC8.endOfLine
+ where
+  pPath = A.takeWhile (not . AC8.isSpace_w8) <?> "pPath"
+
+parseRespStart :: A.Parser StartLine
+parseRespStart
+  = RespLine <$> pVer <* AC8.space
+             <*> pStatCode <* AC8.space
+             <*> pStatDetail <* AC8.endOfLine
+ where
+  pStatCode = AC8.decimal
+  pStatDetail = A.takeWhile (not . AC8.isEndOfLine)
+
+pMethod
+  = (AC8.string "GET" *> return GET) <|>
+    (AC8.string "POST" *> return POST) <|>
+    (AC8.string "CONNECT" *> return CONNECT) <?> "pMethod"
+
+parseRequest :: A.Parser B.ByteString -> A.Parser Message
 parseRequest pBody = do
-  meth <- pMethod <* AC8.space
-  path <- pPath <* AC8.space
-  ver <- pVer <* AC8.endOfLine
-  headers <- M.fromList <$> pHeaders
+  startLine <- parseReqStart
+  headers <- parseHeaders
   -- Check content-encoding or content-length
   body <- case bodyTransferEncoding headers of
     ContentLength len -> A.take len
     Chunked -> pChunked
     TillDisconn -> pBody
-  return $ Request meth path headers body
- where
-  pMethod = (AC8.string "GET" *> return GET) <|>
-            (AC8.string "POST" *> return POST) <|>
-            (AC8.string "CONNECT" *> return CONNECT) <?> "pMethod"
-  pPath = A.takeWhile (not . AC8.isSpace_w8) <?> "pPath"
+  return $ Message startLine headers body
 
-fromResponse :: Monad m => Response -> Producer B.ByteString m ()
-fromResponse resp@(Response {..}) = fromResponse' resp' yield
- where
-  resp' = resp {
-    rsHeaders = mkLengthHeader rsBody `M.union` rsHeaders
-  }
-
-fromResponseChunked :: Monad m => Int -> Response -> Producer B.ByteString m ()
-fromResponseChunked chunkSize resp@(Response {..})
-  = fromResponse' resp' (yieldChunked chunkSize)
- where
-  resp' = resp {
-    rsHeaders = M.insert "Transfer-Encoding" "chunked" rsHeaders
-  }
+parseMessage :: A.Parser B.ByteString -> A.Parser Message
+parseMessage pBody = parseRequest pBody <|> parseResponse pBody
 
 yieldChunked chunkSize bs
-  | B.length bs == 0 = yieldChunked' bs
-  | otherwise = yieldChunked' (B.take chunkSize bs)
+  | B.length bs == 0 = fromChunk bs
+  | otherwise = fromChunk (B.take chunkSize bs)
              *> yieldChunked chunkSize (B.drop chunkSize bs)
-yieldChunked' bs = do
+
+fromChunk bs = do
   yield $ BC8.pack $ showHex (B.length bs) ""
   yield "\r\n"
   yield bs
   yield "\r\n"
     
 
-fromResponse' :: Monad m => Response ->
-                 (B.ByteString -> Producer B.ByteString m ()) -> 
-                 Producer B.ByteString m ()
-fromResponse' (Response {..}) bodyEncoder = do
-  yield "HTTP/1.1 "
-  yield (BC8.pack . show $ statCode rsStatus)
-  yield " "
-  yield $ statDetail rsStatus
-  yield "\r\n"
-  mapM_ fromHeader (M.toList rsHeaders)
-  yield "\r\n"
-  bodyEncoder rsBody
-
 -- pBody is used to parse the rest (or ignore it if we've issued
 -- a CONNECT method on a http proxy.
 -- So the http codec is actually stateful... And Netty's HttpCodec is
 -- (amusingly) doing the right thing!
-parseResponse :: A.Parser B.ByteString -> A.Parser Response
+parseResponse :: A.Parser B.ByteString -> A.Parser Message
 parseResponse pBody = do
-  ver <- pVer <* AC8.space
-  code <- pStatCode <* AC8.space
-  detail <- pStatDetail <* AC8.endOfLine
-  headers <- M.fromList <$> pHeaders
+  startLine <- parseRespStart
+  headers <- parseHeaders
   -- Check content-encoding or content-length
   body <- case bodyTransferEncoding headers of
     ContentLength len -> A.take len
     Chunked -> pChunked
     TillDisconn -> pBody
-  return $ Response (ResponseStatus code detail) headers body
+  return $ Message startLine headers body
  where
-  pStatCode = AC8.decimal
-  pStatDetail = A.takeWhile (not . AC8.isEndOfLine)
 
-pVer = AC8.string "HTTP/1.0" <|> AC8.string "HTTP/1.1" <?> "pVer"
+pVer = (Http10 <$ AC8.string "HTTP/1.0")
+   <|> (Http11 <$ AC8.string "HTTP/1.1")
+   <?> "pVer"
 
-pHeaders = (:) <$> (pHeader <* AC8.endOfLine) <*> pHeaders
-       <|> [] <$ AC8.endOfLine
-
-pHeader = do
-  mbWord <- A.peekWord8
-  if fmap AC8.isEndOfLine mbWord == Just True
-    then fail "Not a header"
-    else do
-      name <- AC8.takeWhile (/= ':') <* AC8.char8 ':' <* AC8.space
-      val <- A.takeWhile (not . AC8.isEndOfLine)
-      return (CI.mk $ BC8.map Char.toLower name, val) <?> "pHeader"
+parseHeaders :: A.Parser Headers
+parseHeaders = M.fromList <$> pHeaders
+ where
+  pHeaders = (:) <$> (pHeader <* AC8.endOfLine) <*> pHeaders
+             <|> [] <$ AC8.endOfLine
+  pHeader = do
+    mbWord <- A.peekWord8
+    if fmap AC8.isEndOfLine mbWord == Just True
+      then fail "Not a header"
+      else do
+        name <- AC8.takeWhile (/= ':') <* AC8.char8 ':' <* AC8.space
+        val <- A.takeWhile (not . AC8.isEndOfLine)
+        return (CI.mk $ BC8.map Char.toLower name, val) <?> "pHeader"
 
 bodyTransferEncoding headers = case M.lookup "content-length" headers of
   Nothing -> case M.lookup "transfer-encoding" headers of
@@ -202,13 +220,16 @@ bodyTransferEncoding headers = case M.lookup "content-length" headers of
     Just "chunked" -> Chunked
   Just bLen -> ContentLength $ read (BC8.unpack bLen)
 
+parseChunk = do
+  chunkLen <- (AC8.hexadecimal :: A.Parser Int) <* AC8.endOfLine
+  A.take chunkLen <* AC8.endOfLine
+
 -- XXX: lazy shall we?
 pChunked = B.concat . reverse <$> pWithResult []
  where
   pWithResult res = do
-    chunkLen <- (AC8.hexadecimal :: A.Parser Int) <* AC8.endOfLine
-    chunk <- A.take chunkLen <* AC8.endOfLine
-    case chunkLen of
+    chunk <- parseChunk
+    case B.length chunk of
       0 -> return res
       _ -> pWithResult (chunk : res)
 

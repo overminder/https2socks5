@@ -77,7 +77,7 @@ bufferedPipe bufSiz maxDelayMs prod = prod'
       Nothing -> do -- timeout
         runEffect $ sendAll currBs
         recvLoop i o' [] 0
-      Just Nothing -> return () -- prod is closed
+      Just Nothing -> runEffect $ sendAll currBs -- prod closed
       Just (Just bs) -> case B.null bs of
         True -> recvLoop i o' currBs currLen -- Ignore empty bs
         _ -> let totalLen = currLen + B.length bs

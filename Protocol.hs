@@ -31,7 +31,8 @@ streamDirHeader = "X-StreamDirection"
 
 data ConnectOpt
   = ConnectOpt {
-    coSecret :: (String, String)
+    coSecret :: (String, String),
+    coHost :: B.ByteString
   }
 
 data ServeOpt
@@ -54,11 +55,11 @@ serveChunkedStreamer (ServeOpt {..}) (fromPeer, toPeer) (prod, cons) = do
       throwIO $ userError "Auth failed"
 
 connectChunkedAsFetcher (ConnectOpt {..}) (fromPeer, toPeer) cons = do
-  runEffect $ H.fromStartLine mkReqStartLine >-> toPeer
+  runEffect $ H.fromStartLine (mkReqStartLine H.GET) >-> toPeer
   let
-    headers = M.fromList [ ("Content-Length", "0")
-                         , (httpHeaderKeyName, mySecretKey)
+    headers = M.fromList [ (httpHeaderKeyName, mySecretKey)
                          , (streamDirHeader, fromString (show ToClient))
+                         , ("Host", coHost)
                          ]
   -- s->c, in this case we should NOT send te:chunk.
   runEffect $ H.fromHeaders headers >-> toPeer
@@ -68,11 +69,12 @@ connectChunkedAsFetcher (ConnectOpt {..}) (fromPeer, toPeer) cons = do
   runEffect $ fromPeer' >-> parserToPipe H.parseChunk >-> cons
 
 connectChunkedAsSender  (ConnectOpt {..}) toPeer prod = do
-  runEffect $ H.fromStartLine mkReqStartLine >-> toPeer
+  runEffect $ H.fromStartLine (mkReqStartLine H.POST) >-> toPeer
   let
     headers = M.fromList [ ("Transfer-Encoding", "chunked")
                          , (httpHeaderKeyName, mySecretKey)
                          , (streamDirHeader, fromString (show ToServer))
+                         , ("Host", coHost)
                          ]
   runEffect $ do
     H.fromHeaders headers >-> toPeer
@@ -83,7 +85,7 @@ serverCheckAuth m = case M.lookup httpHeaderKeyName m of
   Just k | k == mySecretKey -> True
   _ -> False
 
-mkReqStartLine = H.ReqLine H.POST "/" H.Http11
+mkReqStartLine meth = H.ReqLine meth "/" H.Http11
 mkRespStartLine = H.RespLine H.Http11 200 "OK"
 mkChunkHeader = M.singleton "Transfer-Encoding" "chunked"
 mkReqHeaders (k, v) = M.fromList [ (fromString k, fromString v)

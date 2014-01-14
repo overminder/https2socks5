@@ -24,7 +24,6 @@ serve (host, port) = do
     m <- newMVar True
     return $ swapMVar m False
       
-
   let
     -- encoded msg -> msg
     fromC2S = PC.fromInput fromC2SQ >->
@@ -55,5 +54,4 @@ serve (host, port) = do
   serveOpt = ServeOpt (httpHeaderKeyName, mySecretKey)
 
 main = T.withSocketsDo $ do
-
   serve ("localhost", "1234")

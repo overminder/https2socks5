@@ -11,12 +11,7 @@ import Control.Applicative
 import qualified HttpType as H
 import PipesUtil
 
---bs = mapM_ H.fromChunk ["a", "aaa"]
-bs = mapM_ yield ["ab", "\r\n"]
-
-myEol = A.string "\r\n"
+pbs = each (replicate 10 "a")
 
 main = do
-  runEffect $
-    --bs >-> parserToPipe H.parseChunk >-> P.show >-> P.stdoutLn
-    bs >-> parserToPipe (A.string "ab" <* myEol) >-> P.show >-> P.stdoutLn
+  runEffect $ bufferedPipe 20 1000000 pbs >-> P.show >-> P.stdoutLn

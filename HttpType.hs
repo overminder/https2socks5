@@ -108,8 +108,7 @@ fromMessage' :: Monad m => Message ->
                 Producer B.ByteString m ()
 fromMessage' (Message {..}) bodyEncoder = do
   fromStartLine msgStart
-  mapM_ fromHeader (M.toList msgHeaders)
-  yield "\r\n"
+  fromHeaders msgHeaders
   bodyEncoder msgBody
 
 fromMessage msg@(Message {..}) = fromMessage' msg' yield
@@ -130,7 +129,9 @@ fromHeader :: Monad m => (CI.CI B.ByteString, B.ByteString) ->
 fromHeader (name, val)
   = yield (CI.original name) *> yield ": " *> yield val *> yield "\r\n"
 
-fromHeaders = mapM_ fromHeader . M.toList
+fromHeaders hs = do
+  mapM_ fromHeader $ M.toList hs
+  yield "\r\n"
 
 parseReqStart :: A.Parser StartLine
 parseReqStart

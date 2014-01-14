@@ -1,15 +1,18 @@
 import qualified Data.ByteString as B
 import qualified Data.ByteString.UTF8 as BU8
 import Control.Applicative
+import qualified Control.Concurrent as C
 import Control.Concurrent.Async
 import Control.Monad
-import Control.Monad.Writer
+import Control.Monad.Identity
 import Test.QuickCheck
 import Test.QuickCheck.Monadic
 import Pipes
 import qualified Pipes.Concurrent as PC
 
 import Protocol
+import PipesUtil
+import qualified HttpType as H
 
 newtype SomeChunks = SomeChunks { deChunk :: [B.ByteString] }
   deriving (Show)
@@ -61,10 +64,35 @@ testStreaming direction (SomeChunks bs) = monadicIO doPreparation
         bs' <- aggregateResult $ PC.fromInput fromPipe''
         return $ bs' == bs
 
-aggregateResult :: Monad m => Producer a (WriterT [a] m) () -> m [a]
-aggregateResult prod = execWriterT $ runEffect $ prod >-> forever aggr
+aggregateResult :: Monad m => Producer a m () -> m [a]
+aggregateResult prod = aggr' [] prod
  where
-  aggr = await >>= lift . tell . (:[])
+  aggr' xs p = do
+    eiRes <- next p
+    case eiRes of
+      Left _ -> return $ reverse xs
+      Right (x, p') -> aggr' (x:xs) p'
 
-main = quickCheck testStreaming
+testParserToPipe :: [B.ByteString] -> Bool
+testParserToPipe xs = xs == xs'
+ where
+  xs' = runIdentity $
+    aggregateResult $ mapM_ H.fromChunk xs >-> parserToPipe H.parseChunk
+
+testBufferedPipe xss = monadicIO doPreparation
+ where
+  doPreparation :: PropertyM IO Bool
+  doPreparation = run $ do
+    let
+      slowTransmit x = (liftIO $ C.threadDelay 1000) >> yield x
+      fastTransmit x = yield x
+      xs = B.concat xss
+      yields = each xss
+      slows = bufferedPipe 10 2000 yields
+      fasts = bufferedPipe 100 500 yields
+    xs' <- B.concat <$> aggregateResult slows
+    xs'' <- B.concat <$> aggregateResult fasts
+    return $ xs == xs' && xs == xs''
+
+main = quickCheck testBufferedPipe
 

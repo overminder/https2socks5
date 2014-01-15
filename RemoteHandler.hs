@@ -27,12 +27,12 @@ serve (host, port) = do
   let
     -- encoded msg -> msg
     fromC2S = PC.fromInput fromC2SQ >->
-              logWith "c->s chunk" >->
+              --logWith "c->s chunk" >->
               parserToPipe parseMessage >-> logWith "c->s msg: "
     -- msg -> encoded msg
-    fromS2C = bufferedPipe 4000 10 (PC.fromInput fromS2CQ >->
-                                    logWith "s->c msg: " >->
-                                    pipeWithP fromMessage)
+    fromS2C = --bufferedPipe 4000 10
+                (PC.fromInput fromS2CQ >-> logWith "s->c msg: " >->
+                 pipeWithP fromMessage)
 
   serverThread <- async $ runSafeT $
     T.serve (T.Host host) port $ \ (peer, peerAddr) -> do

@@ -99,10 +99,9 @@ connect (host, port) mkSession = do
     fromS2C = PC.fromInput fromS2CQ >->
               parserToPipe parseMessage >-> logWith "s->c msg: "
     -- msg -> bs
-    fromC2S = bufferedPipe 4000 100 (PC.fromInput fromC2SQ >->
-                                     logWith "c->s msg: " >->
-                                     pipeWithP fromMessage) >-> 
-              logWith "c->s chunked msg: "
+    fromC2S = --bufferedPipe 4000 100
+              (PC.fromInput fromC2SQ >-> logWith "c->s msg: " >->
+               pipeWithP fromMessage) -- >-> logWith "c->s chunked msg: "
 
     clientState = ClientState (PC.toOutput toC2SQ) mSockMap
 

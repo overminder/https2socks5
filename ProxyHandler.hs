@@ -154,6 +154,9 @@ logMsg title = forever $ do
   liftIO $ putStr title >> putStrLn (debugMsg msg)
   yield msg
 
+isDisconn (Disconn {..}) = True
+isDisconn _ = False
+
 serverHandleClientReq :: Message -> MVar SockMap ->
                          Consumer Message IO () -> IO ()
 serverHandleClientReq msg mSockMap toClientQ = case msg of
@@ -214,8 +217,10 @@ serverHandleClientReq msg mSockMap toClientQ = case msg of
     case mbSock of
       Just (toS2RQ, _) -> do
         runEffect $ yield msg >-> toS2RQ
-      Nothing ->
-        runEffect $ yield (Disconn (connId msg) "no such conn") >-> toClientQ
+      Nothing
+        | isDisconn msg -> return ()  -- to avoid echoing..
+        | otherwise -> runEffect $ yield (Disconn (connId msg) "no such conn")
+                                         >-> toClientQ
 
 -- Hard lifting done on the c2l loop
 clientHandleServerResp :: Message -> ClientState -> IO () 
@@ -224,8 +229,10 @@ clientHandleServerResp msg (ClientState {..}) = do
   case mbSock of
     Just (toC2LQ, _) ->
       runEffect $ yield msg >-> toC2LQ
-    Nothing ->
-      runEffect $ yield (Disconn (connId msg) "no such conn") >-> toServerQ
+    Nothing
+      | isDisconn msg -> return ()  -- to avoid echoing..
+      | otherwise -> runEffect $ yield (Disconn (connId msg) "no such conn")
+                                 >-> toServerQ
 
 clientHandleSocksReq :: ProxyReq -> ClientState -> SafeT IO ()
 clientHandleSocksReq (ProxyReq {..}) (ClientState {..}) = do

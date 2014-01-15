@@ -39,14 +39,14 @@ serve (host, port) = do
       let
         fromPeer = T.fromSocket peer 4096
         toPeer = T.toSocket peer
-      putStrLn $ "Client " ++ show peerAddr ++ " connected"
       isFirst <- getIsFirst
+      putStrLn $ "Client " ++ show peerAddr ++ " connected, isFirst = " ++
+                 show isFirst
       let
-        mayLog = if not isFirst then (>-> logWith "fromPeer ") else id
+        mayLog = id --if not isFirst then (>-> logWith "fromPeer ") else id
       serveChunkedStreamer serveOpt (mayLog fromPeer, toPeer)
                                     (fromS2C, PC.toOutput toC2SQ)
   handleThread <- async $ runEffect $ for fromC2S $ \ msg -> lift $ do
-    putStrLn $ "Server got msg " ++ show msg
     serverHandleClientReq msg mSockMap (PC.toOutput toS2CQ)
 
   mapM_ wait [serverThread, handleThread]

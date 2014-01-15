@@ -150,15 +150,22 @@ serverHandleClientReq msg mSockMap toClient = case msg of
         runEffect $ yield (Disconn connId "remote closed") >-> toClient
         modifyMVar_ mSockMap $ return . M.delete connId
         putStrLn $ "server handle: " ++ show peerAddr ++ " onclose"
+        -- Correctly shutdown the sock since pipes-network-safe dont do that
+        shutdown peer ShutdownBoth
       register onClose
       lift $ do
         modifyMVar_ mSockMap $
           return . M.insert connId (undefined, PC.toOutput toC2RQ, onClose)
-        t1 <- async $ runEffect $ do
-          yield (ConnResult connId True hostAddr (fromIntegral portNo))
-            >-> toClient
-          T.fromSocket peer 4096 >-> pipeWith (Data connId) >-> toClient
-        runEffect $ PC.fromInput fromC2RQ >-> T.toSocket peer
+        t1 <- async $ do
+          runEffect $ do
+            yield (ConnResult connId True hostAddr (fromIntegral portNo))
+              >-> toClient
+            T.fromSocket peer 4096 >-> pipeWith (Data connId) >-> toClient
+          putStrLn "remote splice loop done (t1, remote closed)"
+        t2 <- async $ do
+          runEffect $ PC.fromInput fromC2RQ >-> T.toSocket peer
+          putStrLn "remote splice loop done (t2, local closed)"
+        waitAny [t1, t2]
       -- No need to wait for t1 since it will be closed when clientQ is sealed
     return ()
 
@@ -223,7 +230,12 @@ clientHandleSocksReq (ProxyReq {..}) (ClientState {..}) = do
 
     -- Start threaded recv/send loop on the queue
     -- The loop will be interrupted and stopped by disconn's calling seal
-    t1 <- async $ runEffect $ PC.fromInput fromC2LQ >-> toLocal
-    t2 <- async $ runEffect $ fromLocal >-> PC.toOutput toL2CQ
-    mapM_ wait [t1, t2]
+    t1 <- async $ do
+      runEffect $ PC.fromInput fromC2LQ >-> toLocal
+      putStrLn $ "proxyReq loop t1 done, C2LQ closed"
+    t2 <- async $ do
+      runEffect $ fromLocal >-> PC.toOutput toL2CQ
+      putStrLn $ "proxyReq loop t2 done, fromLocal has no data"
+    waitAny [t1, t2]
+    return ()
 

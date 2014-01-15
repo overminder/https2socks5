@@ -111,12 +111,11 @@ connect (host, port) mkSession = do
       (fromPeer, toPeer) <- mkSession peer
       connectChunkedAsFetcher connOpt (fromPeer, toPeer)
                                       (PC.toOutput toS2CQ)
-  sendThread <- async $ runSafeT $ return ()
-  --  T.connect host port $ \ (peer, peerAddr) -> lift $ do
-  --    (_, toPeer) <- mkSession peer
-  --    connectChunkedAsSender connOpt toPeer fromC2S
+  sendThread <- async $ runSafeT $
+    T.connect host port $ \ (peer, peerAddr) -> lift $ do
+      (_, toPeer) <- mkSession peer
+      connectChunkedAsSender connOpt toPeer fromC2S
   handleRespThread <- async $ runEffect $ for fromS2C $ \ msg -> lift $ do
-    putStrLn $ "Client got msg " ++ show msg
     clientHandleServerResp msg clientState
 
   socks5AcceptThread <- async $ runSafeT $
@@ -128,10 +127,15 @@ connect (host, port) mkSession = do
       ((connHost, connPort), fromPeer') <- socks5Handshake (toPeer, fromPeer)
       putStrLn $ "Proxy req is " ++ show connHost ++ ":" ++ show connPort
       let
-        proxyReq = ProxyReq toPeer fromPeer' (BU8.toString connHost)
-                                             (show connPort)
-                                             mkUniq
-      runSafeT $ clientHandleSocksReq proxyReq clientState
+        proxyReq = ProxyReq (logWith "toPeer " >-> toPeer)
+                            (fromPeer' >-> logWith "fromPeer ")
+                            (BU8.toString connHost)
+                            (show connPort)
+                            mkUniq
+      runSafeT $ do
+        -- Correctly shutdown the sock since pipes-network-safe dont do that
+        register $ shutdown peer ShutdownBoth
+        clientHandleSocksReq proxyReq clientState
 
   mapM_ wait [recvThread, sendThread, handleRespThread, socks5AcceptThread]
  where
@@ -144,5 +148,5 @@ connectLocal = connect (Config.serverHost, Config.serverPort) noSession
 connectProxyAndThenSSL =
   connect (Config.proxyHost, Config.proxyPort) establishProxyAndTls
 
-main = T.withSocketsDo connectProxyAndThenSSL
+main = T.withSocketsDo connectLocal
 

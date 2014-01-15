@@ -16,9 +16,12 @@ import qualified Pipes.Attoparsec as PA
 
 -- XXX: endianess
 fromSocksResp :: Bool -> Word32 -> Word16 -> Producer B.ByteString IO ()
-fromSocksResp isSucc host port = do
+fromSocksResp True host port = do
   yield $ B.pack [5, 0, 0, 1]
   yield $ S.runPut $ S.put host *> S.put port
+
+fromSocksResp False _ _ = do
+  yield $ B.pack [5, 4] -- host unreachable
 
 parseSocks5Init :: A.Parser ()
 parseSocks5Init = do

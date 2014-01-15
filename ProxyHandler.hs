@@ -1,4 +1,4 @@
-{-# LANGUAGE RecordWildCards #-}
+{-# LANGUAGE RecordWildCards, ScopedTypeVariables #-}
 
 -- Most of the things are generic enough.. Although some socks5-specific
 -- codecs exist here. Consider moving them away?
@@ -10,17 +10,20 @@ import Control.Concurrent hiding (yield)
 import Control.Concurrent.STM
 import Control.Concurrent.Async
 import Control.Monad
+import Control.Exception
 import Data.Word
+import Data.Time.Clock
 import qualified Data.Serialize as S
 import qualified Data.ByteString as B
 import qualified Data.ByteString.UTF8 as BU8
 import qualified Data.Map as M
 import qualified Data.Attoparsec as A
 import Pipes
-import Pipes.Safe
+import Pipes.Safe hiding (try)
 import qualified Pipes.Concurrent as PC
 import qualified Pipes.Network.TCP.Safe as T
 import Network.Socket
+import System.IO.Error
 
 import PipesUtil
 import Socks5
@@ -60,6 +63,7 @@ data ProxyReq
     -- Only available for the proxy req handler
     toLocal :: Consumer B.ByteString IO (),
     fromLocal :: Producer B.ByteString IO (),
+    prPeer :: Socket,
     prHost :: String,
     prPort :: String,
     mkUniq :: IO Int
@@ -72,9 +76,10 @@ data ClientState
     prSockMap :: MVar SockMap
   }
 
-type SockMap = M.Map Int (Producer B.ByteString IO (),
-                          Consumer B.ByteString IO (),
-                          IO ())
+type SockMap = M.Map Int (Consumer Message IO (), -- data/disconn handled 
+                                                  -- by the sock local loop
+                          IO () -- closer
+                          )
 
 runGet' g bs = case S.runGet g bs of
   Right a -> a
@@ -133,109 +138,138 @@ fromNetBS bs = do
 fromNetString :: Monad m => String -> Producer B.ByteString m ()
 fromNetString = fromNetBS . BU8.fromString
 
+async_ = async >=> const (return ())
+
+debugMsg msg = case msg of
+  Connect {..} -> "[Connect#" ++ show connId  ++ " " ++
+                  connHost ++ ":" ++ connPort ++ "]"
+  ConnResult {..} -> "[ConnResult#" ++ show connId  ++ " " ++
+                     show connIsSucc ++ "]"
+  Data {..} -> "[Data#" ++ show connId  ++ " " ++
+               show (B.length dataToSend) ++ "Bytes]"
+  Disconn {..} -> "[Disconn#" ++ show connId  ++ " " ++ disconnReason ++ "]"
+
+logMsg title = forever $ do
+  msg <- await
+  liftIO $ putStr title >> putStrLn (debugMsg msg)
+  yield msg
+
 serverHandleClientReq :: Message -> MVar SockMap ->
                          Consumer Message IO () -> IO ()
-serverHandleClientReq msg mSockMap toClient = case msg of
-  Connect {..} -> do
+serverHandleClientReq msg mSockMap toClientQ = case msg of
+  Connect {..} -> async_ $ do
     -- XXX: conn error handling
-    async $ runSafeT $ T.connect connHost connPort $ \ (peer, peerAddr) -> do
+    let doConn = T.connect connHost connPort 
+    --putStrLn $ "connecting to " ++ connHost ++ ":" ++ connPort
+    ei <- tryIOError $ runSafeT $ doConn $ \ (peer, peerAddr) -> do
+      --lift $ putStrLn $ "connected to " ++ show peerAddr
       -- Make a client->remote queue here.
       -- Note we don't need a remote->client queue since
       -- we are going to run remote->client loop here.
       let
         SockAddrInet portNo hostAddr = peerAddr
-      (toC2RQ, fromC2RQ, seal2) <- lift $ PC.spawn' PC.Unbounded
-      onClose <- lift $ mkIdempotent $ do
-        atomically seal2
-        runEffect $ yield (Disconn connId "remote closed") >-> toClient
-        modifyMVar_ mSockMap $ return . M.delete connId
-        putStrLn $ "server handle: " ++ show peerAddr ++ " onclose"
-        -- Correctly shutdown the sock since pipes-network-safe dont do that
-        shutdown peer ShutdownBoth
-      register onClose
+        toPeer = T.toSocket peer
+        fromPeer = T.fromSocket peer 4096
+      (toS2RQ, fromS2RQ, seal) <- lift $ PC.spawn' PC.Unbounded
+      -- Note that finalizers are ran in the reverse direction
+      mapM_ register [ do putStrLn $
+                            "server handle: " ++ show peerAddr ++ " onclose"
+                          -- Correctly shutdown the sock
+                          -- since pipes-network-safe dont do that
+                          shutdown peer ShutdownBoth
+                     , atomically seal
+                     , modifyMVar_ mSockMap $ return . M.delete connId
+                     , runEffect $
+                         yield (Disconn connId "") >-> toClientQ
+                     ]
       lift $ do
+        let
+          toS2RQ_ = PC.toOutput toS2RQ
         modifyMVar_ mSockMap $
-          return . M.insert connId (undefined, PC.toOutput toC2RQ, onClose)
+          return . M.insert connId (toS2RQ_, atomically seal)
         t1 <- async $ do
           runEffect $ do
             yield (ConnResult connId True hostAddr (fromIntegral portNo))
-              >-> toClient
-            T.fromSocket peer 4096 >-> pipeWith (Data connId) >-> toClient
-          putStrLn "remote splice loop done (t1, remote closed)"
+              >-> toClientQ
+            fromPeer >-> pipeWith (Data connId) >-> toClientQ
         t2 <- async $ do
-          runEffect $ PC.fromInput fromC2RQ >-> T.toSocket peer
-          putStrLn "remote splice loop done (t2, local closed)"
-        waitAny [t1, t2]
+          runEffect $ for (PC.fromInput fromS2RQ) $ \ msg -> case msg of
+            Data {..} -> yield dataToSend >-> toPeer
+            Disconn {..} -> lift $ atomically seal
+            _ -> error $ "server loop t2: got unexpected msg: " ++ debugMsg msg
+        (_, res) <- waitAnyCatch [t1, t2]
+        putStrLn $ "remote splice loop done " ++ show res
       -- No need to wait for t1 since it will be closed when clientQ is sealed
-    return ()
-
-  Data {..} -> do
-    mbSock <- withMVar mSockMap $ return . M.lookup connId
+    case ei of
+      Left e -> do
+        -- conn failure
+        putStrLn $ "conn failure: " ++ show e
+        runEffect $ yield (ConnResult connId False 0 0) >-> toClientQ
+      Right r -> do
+        return ()
+  _ -> do
+    -- Handover to the socket
+    -- See bug #1
+    mbSock <- withMVar mSockMap $ return . M.lookup (connId msg)
     case mbSock of
-      Just (_, toC2RQ, _) -> do
-        runEffect $ yield dataToSend >-> toC2RQ
+      Just (toS2RQ, _) -> do
+        runEffect $ yield msg >-> toS2RQ
       Nothing ->
-        runEffect $ yield (Disconn connId "no such conn") >-> toClient
+        runEffect $ yield (Disconn (connId msg) "no such conn") >-> toClientQ
 
-  Disconn {..} -> do
-    let
-      runMaybeT f m = join (maybe (return ()) f <$> m)
-      runSeal (_, _, x) = x
-    runMaybeT runSeal $ withMVar mSockMap $ return . M.lookup connId 
-
+-- Hard lifting done on the c2l loop
 clientHandleServerResp :: Message -> ClientState -> IO () 
-clientHandleServerResp msg (ClientState {..}) = case msg of
-  ConnResult {..} -> do
-    -- XXX: exception handling
-    Just (fromL2CQ, toC2LQ, _) <- withMVar prSockMap $
-      return . M.lookup connId
-    -- Write socks reply to that sock
-    runEffect $ fromSocksResp connIsSucc usingHost usingPort >-> toC2LQ
-    -- and start splicing
-    async $ runEffect $ fromL2CQ >->
-                        pipeWith (Data connId) >->
-                        toServerQ
-    return ()
-  Data {..} -> do
-    -- XXX: exception handling
-    Just (_, toC2LQ, _) <- withMVar prSockMap $ return . M.lookup connId
-    runEffect $ yield dataToSend >-> toC2LQ
-  Disconn {..} -> do
-    -- XXX: exception handling
-    Just (_, _, seal) <- withMVar prSockMap $ return . M.lookup connId
-    -- XXX: run in another thread?
-    seal
+clientHandleServerResp msg (ClientState {..}) = do
+  mbSock <- withMVar prSockMap $ return . M.lookup (connId msg)
+  case mbSock of
+    Just (toC2LQ, _) ->
+      runEffect $ yield msg >-> toC2LQ
+    Nothing ->
+      runEffect $ yield (Disconn (connId msg) "no such conn") >-> toServerQ
 
 clientHandleSocksReq :: ProxyReq -> ClientState -> SafeT IO ()
 clientHandleSocksReq (ProxyReq {..}) (ClientState {..}) = do
   sockId <- lift $ mkUniq
   -- make queues so as to provide non-blocking streams
   -- for the server resp handler to use
-  (toC2LQ, fromC2LQ, seal1) <- lift $ PC.spawn' PC.Unbounded
-  (toL2CQ, fromL2CQ, seal2) <- lift $ PC.spawn' PC.Unbounded
+  (toC2LQ, fromC2LQ, seal) <- lift $ PC.spawn' PC.Unbounded
 
-  onClose <- lift $ mkIdempotent $ do
-    atomically $ seal1 >> seal2
-    modifyMVar_ prSockMap $ return . M.delete sockId
-    putStrLn $ "proxy handle: " ++ prHost ++ ":" ++ prPort ++ " onclose"
-  register onClose
+  mapM_ register [ shutdown prPeer ShutdownBoth
+                 , atomically seal
+                 , modifyMVar_ prSockMap $ return . M.delete sockId
+                 , do putStrLn $ "proxy handle: " ++ prHost ++
+                                 ":" ++ prPort ++ " onclose"
+                      runEffect $ yield (Disconn sockId "local closed") >->
+                                  toServerQ
+                 ]
 
   lift $ do
     modifyMVar_ prSockMap $
-      return . M.insert sockId (PC.fromInput fromL2CQ,
-                                PC.toOutput toC2LQ, onClose)
+      return . M.insert sockId (PC.toOutput toC2LQ, atomically seal)
 
     -- XXX: shall we run this in another thread?
     runEffect $ yield (Connect sockId prHost prPort) >-> toServerQ
 
-    -- Start threaded recv/send loop on the queue
-    -- The loop will be interrupted and stopped by disconn's calling seal
-    t1 <- async $ do
-      runEffect $ PC.fromInput fromC2LQ >-> toLocal
-      putStrLn $ "proxyReq loop t1 done, C2LQ closed"
+    -- Start client->local msg loop
+    t1 <- async $ runEffect $ for (PC.fromInput fromC2LQ) $ \ msg -> case msg of
+      Data {..} -> yield dataToSend >-> toLocal
+      Disconn {..} -> lift $ atomically seal
+      ConnResult {..} -> do
+        fromSocksResp connIsSucc usingHost usingPort >-> toLocal
+        if connIsSucc
+          then
+            -- Splicing loop already started in handle proxy
+            -- Though I could make a lock... but for the sake of avoiding
+            -- deadlock, I decide not to make one.
+            return ()
+          else
+            lift $ atomically seal
+      _ -> error $ "client t1: unexpected msg: " ++ debugMsg msg
+    -- and local->client bs loop (according to socks5 protocol, no data will
+    -- be sent before proxy server acked the conn succ)
     t2 <- async $ do
-      runEffect $ fromLocal >-> PC.toOutput toL2CQ
-      putStrLn $ "proxyReq loop t2 done, fromLocal has no data"
-    waitAny [t1, t2]
+      runEffect $ fromLocal >-> pipeWith (Data sockId) >-> toServerQ
+    waitAnyCatch [t1, t2]
+    putStrLn $ "proxyReq loop t1 or t2 done"
     return ()
 

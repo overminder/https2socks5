@@ -129,13 +129,11 @@ connect (host, port) mkSession = do
       let
         proxyReq = ProxyReq (logWith "toPeer " >-> toPeer)
                             (fromPeer' >-> logWith "fromPeer ")
+                            peer
                             (BU8.toString connHost)
                             (show connPort)
                             mkUniq
-      runSafeT $ do
-        -- Correctly shutdown the sock since pipes-network-safe dont do that
-        register $ shutdown peer ShutdownBoth
-        clientHandleSocksReq proxyReq clientState
+      runSafeT $ clientHandleSocksReq proxyReq clientState
 
   mapM_ wait [recvThread, sendThread, handleRespThread, socks5AcceptThread]
  where

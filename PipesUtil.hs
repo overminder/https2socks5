@@ -47,6 +47,15 @@ pipeWithP p = do
         Right (b, p') -> yield b >> loopWith p'
   loopWith (p a)
 
+accumProd :: Monad m => Producer a m () -> m [a]
+accumProd = go []
+ where
+  go out p = do
+    ei <- next p
+    case ei of
+      Left _ -> return . reverse $ out
+      Right (a, p') -> go (a:out) p'
+
 -- Provides a buffering for small bs producer as well as dropping empty str
 -- XXX due to the fact that maxDelayMs is used, the pipe might be blocked
 -- for a while AND several threads are involved.
@@ -94,6 +103,5 @@ mkIdempotent m = do
 
 logWith title = forever $ do
   wat <- await
-  lift $ putStr title >> print wat
+  liftIO $ putStr title >> print wat
   yield wat
-

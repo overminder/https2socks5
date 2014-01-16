@@ -20,7 +20,7 @@ import System.IO
 
 import qualified HttpType as H
 import qualified Config
-import Protocol
+import Protocol.Comet
 import ProxyHandler
 import MyKey
 import PipesUtil
@@ -108,12 +108,12 @@ connect (host, port) mkSession = do
   recvThread <- async $ runSafeT $
     T.connect host port $ \ (peer, peerAddr) -> lift $ do
       (fromPeer, toPeer) <- mkSession peer
-      connectChunkedAsFetcher connOpt (fromPeer, toPeer)
+      connectAsFetcher connOpt (fromPeer, toPeer)
                                       (PC.toOutput toS2CQ)
   sendThread <- async $ runSafeT $
     T.connect host port $ \ (peer, peerAddr) -> lift $ do
-      (_, toPeer) <- mkSession peer
-      connectChunkedAsSender connOpt toPeer fromC2S
+      (fromPeer, toPeer) <- mkSession peer
+      connectAsSender connOpt (fromPeer, toPeer) fromC2S
   handleRespThread <- async $ runEffect $ for fromS2C $ \ msg -> lift $ do
     clientHandleServerResp msg clientState
 

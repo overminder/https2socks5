@@ -66,6 +66,14 @@ mkRequest meth uriStr body = mkRequestURI meth uri body
  where
   Just uri = parseURI uriStr
 
+mkRequestPathHeader :: Method -> B.ByteString ->
+                       Headers -> B.ByteString -> Message
+mkRequestPathHeader meth path headers body = Message {
+  msgStart = ReqLine meth path Http11,
+  msgHeaders = headers,
+  msgBody = body
+}
+
 mkRequestURI :: Method -> URI -> B.ByteString -> Message
 mkRequestURI meth (URI {..}) body = Message {
   msgStart = ReqLine meth path Http11,

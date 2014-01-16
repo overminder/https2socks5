@@ -8,13 +8,13 @@ import qualified Pipes.Concurrent as PC
 import qualified Pipes.Network.TCP.Safe as T
 
 import qualified HttpType as H
-import Protocol
+import Protocol.Comet
 import ProxyHandler
 import MyKey
 import PipesUtil
 
-serve :: (String, String) -> IO ()
-serve (host, port) = do
+serveOn :: (String, String) -> IO ()
+serveOn (host, port) = do
   mSockMap <- newMVar M.empty
 
   (toC2SQ, fromC2SQ) <- PC.spawn PC.Unbounded
@@ -44,7 +44,7 @@ serve (host, port) = do
                  show isFirst
       let
         mayLog = id --if not isFirst then (>-> logWith "fromPeer ") else id
-      serveChunkedStreamer serveOpt (mayLog fromPeer, toPeer)
+      serve serveOpt (mayLog fromPeer, toPeer)
                                     (fromS2C, PC.toOutput toC2SQ)
   handleThread <- async $ runEffect $ for fromC2S $ \ msg -> lift $ do
     serverHandleClientReq msg mSockMap (PC.toOutput toS2CQ)
@@ -54,4 +54,4 @@ serve (host, port) = do
   serveOpt = ServeOpt (httpHeaderKeyName, mySecretKey)
 
 main = T.withSocketsDo $ do
-  serve ("localhost", "1234")
+  serveOn ("localhost", "1234")

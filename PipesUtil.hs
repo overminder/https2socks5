@@ -7,6 +7,8 @@ import Control.Concurrent.Async
 import Control.Concurrent.STM
 import qualified Data.Attoparsec as A
 import qualified Data.ByteString as B
+import qualified Data.ByteString.UTF8 as BU8
+import qualified Data.Serialize as S
 import Pipes
 import qualified Pipes.Concurrent as PC
 import System.Timeout
@@ -105,3 +107,26 @@ logWith title = forever $ do
   wat <- await
   liftIO $ putStr title >> print wat
   yield wat
+
+runGet' g bs = case S.runGet g bs of
+  Right a -> a
+  Left e -> error $ show e
+
+parseNetString :: A.Parser String
+parseNetString = BU8.toString <$> parseNetBS
+
+parseNetBS :: A.Parser B.ByteString
+parseNetBS = do
+  len <- fromIntegral . runGet' S.getWord32be <$> A.take 4
+  A.take len
+
+fromNetBS :: Monad m => B.ByteString -> Producer B.ByteString m ()
+fromNetBS bs = do
+  yield $ S.runPut $ S.putWord32be (fromIntegral $ B.length bs)
+  yield bs
+
+fromNetString :: Monad m => String -> Producer B.ByteString m ()
+fromNetString = fromNetBS . BU8.fromString
+
+fromWord32be i = yield (S.runPut $ S.putWord32be (fromIntegral i))
+

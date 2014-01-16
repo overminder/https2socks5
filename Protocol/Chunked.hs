@@ -1,5 +1,5 @@
 {-# LANGUAGE RecordWildCards, OverloadedStrings, NoMonomorphismRestriction #-}
-module Protocol where
+module Protocol.Chunked where
 
 import Control.Concurrent.Async
 import Control.Concurrent.STM
@@ -40,7 +40,13 @@ data ServeOpt
     soSecret :: (String, String)
   }
 
-serveChunkedStreamer (ServeOpt {..}) (fromPeer, toPeer) (prod, cons) = do
+serve :: ServeOpt -> ( Producer B.ByteString IO ()
+                     , Consumer B.ByteString IO ()
+                     ) ->
+                     ( Producer B.ByteString IO ()
+                     , Consumer B.ByteString IO ()
+                     ) -> IO ()
+serve (ServeOpt {..}) (fromPeer, toPeer) (prod, cons) = do
   ((Right (_, startLine), Right (_, headers)), fromPeer')
     <- (`runStateT` fromPeer)
        ((,) <$> (PA.parse H.parseReqStart) <*> (PA.parse H.parseHeaders))
@@ -54,7 +60,10 @@ serveChunkedStreamer (ServeOpt {..}) (fromPeer, toPeer) (prod, cons) = do
     else do
       throwIO $ userError "Auth failed"
 
-connectChunkedAsFetcher (ConnectOpt {..}) (fromPeer, toPeer) cons = do
+connectAsFetcher :: ConnectOpt -> ( Producer B.ByteString IO ()
+                                  , Consumer B.ByteString IO ()
+                                  ) -> Consumer B.ByteString IO () -> IO ()
+connectAsFetcher (ConnectOpt {..}) (fromPeer, toPeer) cons = do
   runEffect $ H.fromStartLine (mkReqStartLine H.GET) >-> toPeer
   let
     headers = M.fromList [ (httpHeaderKeyName, mySecretKey)
@@ -68,7 +77,10 @@ connectChunkedAsFetcher (ConnectOpt {..}) (fromPeer, toPeer) cons = do
     PA.parse (H.parseRespStart *> H.parseHeaders)
   runEffect $ fromPeer' >-> parserToPipe H.parseChunk >-> cons
 
-connectChunkedAsSender  (ConnectOpt {..}) toPeer prod = do
+connectAsSender :: ConnectOpt -> ( Producer B.ByteString IO ()
+                                 , Consumer B.ByteString IO ()
+                                 ) -> Producer B.ByteString IO () -> IO ()
+connectAsSender  (ConnectOpt {..}) (_fromPeer, toPeer) prod = do
   runEffect $ H.fromStartLine (mkReqStartLine H.POST) >-> toPeer
   let
     headers = M.fromList [ ("Transfer-Encoding", "chunked")

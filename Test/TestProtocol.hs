@@ -10,7 +10,8 @@ import Test.QuickCheck.Monadic
 import Pipes
 import qualified Pipes.Concurrent as PC
 
-import Protocol
+import Protocol.Comet
+import Protocol.Chunked (StreamDirection (..))
 import PipesUtil
 import qualified HttpType as H
 
@@ -43,41 +44,33 @@ testStreaming direction (SomeChunks bs) = monadicIO doPreparation
                              -- (fetcher) writen by client
       <- replicateM 5 $ PC.spawn PC.Unbounded
     tServer <- async $
-      serveChunkedStreamer undefined
-                           (PC.fromInput remoteRecv, PC.toOutput remoteSend)
-                           (PC.fromInput fromPipe, PC.toOutput toPipe')
+      serve undefined
+            (PC.fromInput remoteRecv, PC.toOutput remoteSend)
+            (PC.fromInput fromPipe, PC.toOutput toPipe')
     tClient <- async $ case direction of
-      ToServer -> connectChunkedAsSender undefined
-                                         (PC.toOutput localSend)
+      ToServer -> connectAsSender undefined
+                                         (PC.fromInput localRecv,
+                                          PC.toOutput localSend)
                                          (PC.fromInput fromPipe'')
-      ToClient -> connectChunkedAsFetcher undefined
+      ToClient -> connectAsFetcher undefined
                                           (PC.fromInput localRecv,
                                            PC.toOutput localSend)
                                           (PC.toOutput toPipe'')
     case direction of
       ToServer -> do
         runEffect $ mapM_ yield bs >-> PC.toOutput toPipe''
-        bs' <- aggregateResult $ PC.fromInput fromPipe'
+        bs' <- accumProd $ PC.fromInput fromPipe'
         return $ bs' == bs
       ToClient -> do
         runEffect $ mapM_ yield bs >-> PC.toOutput toPipe
-        bs' <- aggregateResult $ PC.fromInput fromPipe''
+        bs' <- accumProd $ PC.fromInput fromPipe''
         return $ bs' == bs
-
-aggregateResult :: Monad m => Producer a m () -> m [a]
-aggregateResult prod = aggr' [] prod
- where
-  aggr' xs p = do
-    eiRes <- next p
-    case eiRes of
-      Left _ -> return $ reverse xs
-      Right (x, p') -> aggr' (x:xs) p'
 
 testParserToPipe :: [B.ByteString] -> Bool
 testParserToPipe xs = xs == xs'
  where
   xs' = runIdentity $
-    aggregateResult $ mapM_ H.fromChunk xs >-> parserToPipe H.parseChunk
+    accumProd $ mapM_ H.fromChunk xs >-> parserToPipe H.parseChunk
 
 testBufferedPipe xss = monadicIO doPreparation
  where
@@ -90,9 +83,9 @@ testBufferedPipe xss = monadicIO doPreparation
       yields = each xss
       slows = bufferedPipe 10 2000 yields
       fasts = bufferedPipe 100 500 yields
-    xs' <- B.concat <$> aggregateResult slows
-    xs'' <- B.concat <$> aggregateResult fasts
+    xs' <- B.concat <$> accumProd slows
+    xs'' <- B.concat <$> accumProd fasts
     return $ xs == xs' && xs == xs''
 
-main = quickCheck testBufferedPipe
+main = quickCheck testStreaming
 

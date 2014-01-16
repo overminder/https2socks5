@@ -81,22 +81,18 @@ type SockMap = M.Map Int (Consumer Message IO (), -- data/disconn handled
                           IO () -- closer
                           )
 
-runGet' g bs = case S.runGet g bs of
-  Right a -> a
-  Left e -> error $ show e
-
 parseMessage :: A.Parser Message
 parseMessage = do
   tag <- A.anyWord8
   connId <- fromIntegral . runGet' S.getWord32be <$> A.take 4
   case tag of
-    1 -> Connect connId <$> (BU8.toString <$> parseNetString)
-                        <*> (BU8.toString <$> parseNetString)
+    1 -> Connect connId <$> parseNetString
+                        <*> parseNetString
     2 -> ConnResult connId <$> (num2Bool <$> A.anyWord8)
                            <*> (runGet' S.get <$> A.take 4)
                            <*> (runGet' S.get <$> A.take 2)
-    3 -> Data connId <$> parseNetString
-    4 -> Disconn connId <$> (BU8.toString <$> parseNetString)
+    3 -> Data connId <$> parseNetBS
+    4 -> Disconn connId <$> parseNetString
  where
   num2Bool 0 = False
   num2Bool 1 = True
@@ -124,19 +120,6 @@ fromMessage (Disconn {..}) = do
   yield $ S.runPut $ S.putWord8 4
   yield $ S.runPut $ S.putWord32be (fromIntegral connId)
   fromNetString disconnReason
-
-parseNetString :: A.Parser B.ByteString
-parseNetString = do
-  len <- fromIntegral . runGet' S.getWord32be <$> A.take 4
-  A.take len
-
-fromNetBS :: Monad m => B.ByteString -> Producer B.ByteString m ()
-fromNetBS bs = do
-  yield $ S.runPut $ S.putWord32be (fromIntegral $ B.length bs)
-  yield bs
-
-fromNetString :: Monad m => String -> Producer B.ByteString m ()
-fromNetString = fromNetBS . BU8.fromString
 
 async_ = async >=> const (return ())
 

@@ -77,7 +77,7 @@ serve opt@(ServeOpt {..}) (fromPeer, toPeer) (prod, cons)
   = (`evalStateT` fromPeer) $ serveLoop opt toPeer (prod, cons)
 
 serveLoop opt@(ServeOpt {..}) toPeer (prod, cons) = do
-  Right (_, H.Message {..}) <- PA.parse (H.parseRequest undefined)
+  Right (_, H.Message {..}) <- PA.parse H.parseRequest
   if serverCheckAuth msgHeaders
     then do
       let Right msg = A.parseOnly parseMessage msgBody
@@ -117,7 +117,7 @@ connectAsFetcher (ConnectOpt {..}) (fromPeer, toPeer) cons = do
 
 fetchLoop headers toPeer cons = do
   lift $ runEffect $ fromReqMsg headers (Poll 5000000) >-> toPeer
-  Right (_, H.Message {..}) <- PA.parse (H.parseResponse undefined)
+  Right (_, H.Message {..}) <- PA.parse H.parseResponse
   let Right msg = A.parseOnly parseMessage msgBody
   case msg of
     Send bs -> do
@@ -140,7 +140,7 @@ connectAsSender (ConnectOpt {..}) (fromPeer, toPeer) prod = do
 sendLoop headers toPeer prod = do
   Right (bs, prod') <- lift $ next prod
   lift $ runEffect $ fromReqMsg headers (Send bs) >-> toPeer
-  _ <- PA.parse (H.parseResponse undefined)
+  _ <- PA.parse H.parseResponse
   sendLoop headers toPeer prod'
 
 fromReqMsg hs msg = H.fromMessage hMsg

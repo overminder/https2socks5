@@ -44,8 +44,8 @@ establishProxyAndTls peer = do
   -- Proxy conn
   runEffect $
     H.fromMessage (H.mkRequest H.CONNECT Config.serverUri "") >-> toPeer
-  Right (_, fromPeer') <- next (fromPeer >->
-                                parserToPipe (H.parseResponse $ return B.empty))
+  Right (_, fromPeer') <- next
+    (fromPeer >-> parserToPipe (H.parseResponseWith (return B.empty)))
 
   -- establish tls
   let

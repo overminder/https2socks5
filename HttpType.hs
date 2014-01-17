@@ -163,19 +163,21 @@ pMethod
     (AC8.string "POST" *> return POST) <|>
     (AC8.string "CONNECT" *> return CONNECT) <?> "pMethod"
 
-parseRequest :: A.Parser B.ByteString -> A.Parser Message
-parseRequest pBody = do
-  startLine <- parseReqStart
+parseRequest :: A.Parser Message
+parseRequest = do
+  startLine@(ReqLine {..}) <- parseReqStart
   headers <- parseHeaders
   -- Check content-encoding or content-length
   body <- case bodyTransferEncoding headers of
     ContentLength len -> A.take len
     Chunked -> pChunked
-    TillDisconn -> pBody
+    TillDisconn
+      | rqMethod == GET -> return ""
+      | otherwise       -> A.takeByteString
   return $ Message startLine headers body
 
-parseMessage :: A.Parser B.ByteString -> A.Parser Message
-parseMessage pBody = parseRequest pBody <|> parseResponse pBody
+parseMessage :: A.Parser Message
+parseMessage = parseRequest <|> parseResponse
 
 yieldChunked chunkSize bs
   | B.length bs == 0 = fromChunk bs
@@ -189,12 +191,14 @@ fromChunk bs = do
   yield "\r\n"
     
 
+parseResponse :: A.Parser Message
+parseResponse = parseResponseWith A.takeByteString
+
 -- pBody is used to parse the rest (or ignore it if we've issued
 -- a CONNECT method on a http proxy.
 -- So the http codec is actually stateful... And Netty's HttpCodec is
 -- (amusingly) doing the right thing!
-parseResponse :: A.Parser B.ByteString -> A.Parser Message
-parseResponse pBody = do
+parseResponseWith pBody = do
   startLine <- parseRespStart
   headers <- parseHeaders
   -- Check content-encoding or content-length
